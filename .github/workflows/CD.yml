@@ -25,68 +25,89 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Preparar el directorio en el servidor
-        uses: appleboy/ssh-action@v1.2.2
-        with:
-          host: 3.81.225.222
-          username: jacobo.vocos
-          key: ${{ secrets.EC2_SSH_KEY }}
-          port: 22
-          command_timeout: 2m
-          script: mkdir -p "$HOME/app"
+      - name: Preparar la llave
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import textwrap
+          from pathlib import Path
 
-      - name: Copiar docker-compose.yml
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 3.81.225.222
-          username: jacobo.vocos
-          key: ${{ secrets.EC2_SSH_KEY }}
-          port: 22
-          source: docker-compose.yml
-          target: /home/jacobo.vocos/app
-          overwrite: true
-          strip_components: 0
+          raw = os.environ.get("EC2_SSH_KEY", "").replace("\r", "").strip()
+          raw = raw.replace("\\n", "\n")
+          match = re.search(
+              r"-----BEGIN ([A-Z0-9 ]+)-----(.*)-----END \1-----",
+              raw,
+              re.S,
+          )
+          if not match:
+              raise SystemExit(
+                  "EC2_SSH_KEY no contiene una llave privada. "
+                  "Tiene que incluir las lineas BEGIN y END."
+              )
+          body = re.sub(r"\s+", "", match.group(2))
+          lines = textwrap.wrap(body, 70)
+          key = (
+              f"-----BEGIN {match.group(1)}-----\n"
+              + "\n".join(lines)
+              + f"\n-----END {match.group(1)}-----\n"
+          )
+          path = Path(os.environ["RUNNER_TEMP"]) / "ec2.pem"
+          path.write_text(key)
+          path.chmod(0o600)
+          PY
+          ssh-keygen -y -f "$RUNNER_TEMP/ec2.pem" >/dev/null
 
-      - name: Actualizar los contenedores
-        uses: appleboy/ssh-action@v1.2.2
+      - name: Publicar en el servidor
         env:
           IMAGE_TAG: v${{ github.event.workflow_run.run_number }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        with:
-          host: 3.81.225.222
-          username: jacobo.vocos
-          key: ${{ secrets.EC2_SSH_KEY }}
-          port: 22
-          command_timeout: 15m
-          envs: IMAGE_TAG,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
-          script: |
-            set -eu
-            cd "$HOME/app"
-            test -n "$IMAGE_TAG"
-            test -n "$DOCKERHUB_USERNAME"
-            test -n "$DOCKERHUB_TOKEN"
-            printf 'IMAGE_TAG=%s\nDOCKERHUB_USERNAME=%s\n' "$IMAGE_TAG" "$DOCKERHUB_USERNAME" > .env
-            if docker info >/dev/null 2>&1; then
-              printf '%s' "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-              if docker compose version >/dev/null 2>&1; then
-                docker compose pull
-                docker compose up -d --force-recreate
-                docker compose ps
-              else
-                docker-compose pull
-                docker-compose up -d --force-recreate
-                docker-compose ps
-              fi
+        run: |
+          set -euo pipefail
+          test -n "$IMAGE_TAG"
+          test -n "$DOCKERHUB_USERNAME"
+          test -n "$DOCKERHUB_TOKEN"
+          ssh_opts=(
+            -i "$RUNNER_TEMP/ec2.pem"
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=accept-new
+            -o ConnectTimeout=20
+          )
+          remote=jacobo.vocos@3.81.225.222
+          ssh "${ssh_opts[@]}" "$remote" "mkdir -p ~/app"
+          scp "${ssh_opts[@]}" docker-compose.yml "$remote:~/app/docker-compose.yml"
+          ssh "${ssh_opts[@]}" "$remote" "bash -s" <<EOF
+          set -eu
+          cd "\$HOME/app"
+          export IMAGE_TAG=$(printf '%q' "$IMAGE_TAG")
+          export DOCKERHUB_USERNAME=$(printf '%q' "$DOCKERHUB_USERNAME")
+          export DOCKERHUB_TOKEN=$(printf '%q' "$DOCKERHUB_TOKEN")
+          printf 'IMAGE_TAG=%s\nDOCKERHUB_USERNAME=%s\n' "\$IMAGE_TAG" "\$DOCKERHUB_USERNAME" > .env
+          if docker info >/dev/null 2>&1; then
+            printf '%s' "\$DOCKERHUB_TOKEN" | docker login -u "\$DOCKERHUB_USERNAME" --password-stdin
+            if docker compose version >/dev/null 2>&1; then
+              docker compose pull
+              docker compose up -d --force-recreate
+              docker compose ps
             else
-              printf '%s' "$DOCKERHUB_TOKEN" | sudo docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-              if sudo docker compose version >/dev/null 2>&1; then
-                sudo docker compose pull
-                sudo docker compose up -d --force-recreate
-                sudo docker compose ps
-              else
-                sudo docker-compose pull
-                sudo docker-compose up -d --force-recreate
-                sudo docker-compose ps
-              fi
+              docker-compose pull
+              docker-compose up -d --force-recreate
+              docker-compose ps
             fi
+          else
+            printf '%s' "\$DOCKERHUB_TOKEN" | sudo docker login -u "\$DOCKERHUB_USERNAME" --password-stdin
+            if sudo docker compose version >/dev/null 2>&1; then
+              sudo docker compose pull
+              sudo docker compose up -d --force-recreate
+              sudo docker compose ps
+            else
+              sudo docker-compose pull
+              sudo docker-compose up -d --force-recreate
+              sudo docker-compose ps
+            fi
+          fi
+          EOF
