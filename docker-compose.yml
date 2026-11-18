@@ -1,0 +1,41 @@
+name: jacobo-vocos
+
+services:
+  web:
+    image: ${DOCKERHUB_USERNAME}/tpec2:${IMAGE_TAG:-latest}
+    ports:
+      - "8093:80"
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_NAME: publicaciones
+      DB_USER: app
+      DB_PASSWORD: Publicaciones8093
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: publicaciones
+      MYSQL_USER: app
+      MYSQL_PASSWORD: Publicaciones8093
+      MYSQL_ROOT_PASSWORD: PublicacionesRoot8093
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -uapp -p\"$$MYSQL_PASSWORD\" -e 'SELECT 1' publicaciones"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    restart: unless-stopped
+
+volumes:
+  db_data:
+    name: jacobo-vocos-db

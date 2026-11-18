@@ -1,0 +1,5 @@
+.git
+.github
+*.pem
+acceso.txt
+.env

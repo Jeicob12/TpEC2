@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publicar-imagen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obtener el codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar version y mensaje
+        run: |
+          git log -1 --pretty=%s | tr -d '\r' | head -n 1 > commit_message.txt
+          printf 'v%s' "${{ github.run_number }}" > app_version.txt
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Entrar a Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Construir y publicar la imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/tpec2:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/tpec2:v${{ github.run_number }}
+
+      - name: Comprobar que la imagen quedo en Docker Hub
+        run: docker buildx imagetools inspect ${{ secrets.DOCKERHUB_USERNAME }}/tpec2:v${{ github.run_number }}
